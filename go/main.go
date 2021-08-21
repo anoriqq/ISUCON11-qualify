@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
@@ -50,6 +51,8 @@ var (
 	jiaJWTSigningKey *ecdsa.PublicKey
 
 	postIsuConditionTargetBaseURL string // JIAへのactivate時に登録する，ISUがconditionを送る先のURL
+
+	environment string
 )
 
 type Config struct {
@@ -193,6 +196,22 @@ func (mc *MySQLConnectionEnv) ConnectDB() (*sqlx.DB, error) {
 	return sqlx.Open("mysql", dsn)
 }
 
+type env string
+
+const (
+	production env = "production"
+	develop    env = "develop"
+)
+
+func (e env) Valid() bool {
+	switch e {
+	case production, develop:
+		return true
+	default:
+		panic(fmt.Sprintf("invalid env=%s", e))
+	}
+}
+
 func init() {
 	sessionStore = sessions.NewCookieStore([]byte(getEnv("SESSION_KEY", "isucondition")))
 
@@ -204,14 +223,26 @@ func init() {
 	if err != nil {
 		log.Fatalf("failed to parse ECDSA public key: %v", err)
 	}
+
+	flag.StringVar(&environment, "env", string(production), "環境")
 }
 
 func main() {
-	e := echo.New()
-	e.Debug = true
-	e.Logger.SetLevel(log.DEBUG)
+	flag.Parse()
 
-	e.Use(middleware.Logger())
+	e := echo.New()
+
+	env := env(environment)
+	if env.Valid() && env == develop {
+		e.Debug = true
+		e.Logger.SetLevel(log.DEBUG)
+		e.Use(middleware.Logger())
+	} else {
+		e.Debug = false
+		e.Logger.SetLevel(log.OFF)
+		e.Logger.SetOutput(ioutil.Discard)
+	}
+
 	e.Use(middleware.Recover())
 
 	e.POST("/initialize", postInitialize)
@@ -245,7 +276,12 @@ func main() {
 		return
 	}
 	db.SetMaxOpenConns(10)
-	defer db.Close()
+	defer func(db *sqlx.DB) {
+		err := db.Close()
+		if err != nil {
+			panic(err)
+		}
+	}(db)
 
 	postIsuConditionTargetBaseURL = os.Getenv("POST_ISUCONDITION_TARGET_BASE_URL")
 	if postIsuConditionTargetBaseURL == "" {
@@ -1254,7 +1290,7 @@ func isValidConditionFormat(conditionStr string) bool {
 		}
 	}
 
-	return (idxCondStr == len(conditionStr))
+	return idxCondStr == len(conditionStr)
 }
 
 func getIndex(c echo.Context) error {
